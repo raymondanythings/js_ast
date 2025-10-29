@@ -73,6 +73,14 @@ pub trait Visitor {
         walk_pattern(self, pattern);
     }
 
+    fn visit_object_pattern(&mut self, pattern: &ObjectPattern) {
+        walk_object_pattern(self, pattern);
+    }
+
+    fn visit_object_pattern_property(&mut self, property: &ObjectPatternProperty) {
+        walk_object_pattern_property(self, property);
+    }
+
     fn visit_type_annotation(&mut self, annotation: &TypeAnnotation) {
         walk_type_annotation(self, annotation);
     }
@@ -93,6 +101,14 @@ pub trait Visitor {
 
     fn visit_object_expression(&mut self, expression: &ObjectExpression) {
         walk_object_expression(self, expression);
+    }
+
+    fn visit_arrow_function_expression(&mut self, expression: &ArrowFunctionExpression) {
+        walk_arrow_function_expression(self, expression);
+    }
+
+    fn visit_arrow_function_body(&mut self, body: &ArrowFunctionBody) {
+        walk_arrow_function_body(self, body);
     }
 
     fn visit_object_property(&mut self, property: &ObjectProperty) {
@@ -338,6 +354,7 @@ pub fn walk_expression<V: Visitor + ?Sized>(visitor: &mut V, expression: &Expres
         Expression::Assignment(assign) => visitor.visit_assignment_expression(assign),
         Expression::Conditional(cond) => visitor.visit_conditional_expression(cond),
         Expression::JsxElement(element) => visitor.visit_jsx_element(element),
+        Expression::ArrowFunction(func) => visitor.visit_arrow_function_expression(func),
         Expression::Parenthesized(paren) => visitor.visit_parenthesized_expression(paren),
     }
 }
@@ -345,6 +362,26 @@ pub fn walk_expression<V: Visitor + ?Sized>(visitor: &mut V, expression: &Expres
 pub fn walk_pattern<V: Visitor + ?Sized>(visitor: &mut V, pattern: &Pattern) {
     match pattern {
         Pattern::Identifier(identifier) => visitor.visit_identifier(identifier),
+        Pattern::Object(pattern) => visitor.visit_object_pattern(pattern),
+    }
+}
+
+pub fn walk_object_pattern<V: Visitor + ?Sized>(visitor: &mut V, pattern: &ObjectPattern) {
+    for property in &pattern.properties {
+        visitor.visit_object_pattern_property(property);
+    }
+}
+
+pub fn walk_object_pattern_property<V: Visitor + ?Sized>(
+    visitor: &mut V,
+    property: &ObjectPatternProperty,
+) {
+    match property {
+        ObjectPatternProperty::Shorthand(identifier) => visitor.visit_identifier(identifier),
+        ObjectPatternProperty::KeyValue { key, value } => {
+            visitor.visit_identifier(key);
+            visitor.visit_pattern(value);
+        }
     }
 }
 
@@ -378,6 +415,26 @@ pub fn walk_object_property<V: Visitor + ?Sized>(visitor: &mut V, property: &Obj
     match property {
         ObjectProperty::Property(prop) => visitor.visit_property(prop),
         ObjectProperty::Spread(spread) => visitor.visit_spread_element(spread),
+    }
+}
+
+pub fn walk_arrow_function_expression<V: Visitor + ?Sized>(
+    visitor: &mut V,
+    expression: &ArrowFunctionExpression,
+) {
+    for param in &expression.params {
+        visitor.visit_function_param(param);
+    }
+    if let Some(return_type) = &expression.return_type {
+        visitor.visit_type_annotation(return_type);
+    }
+    visitor.visit_arrow_function_body(&expression.body);
+}
+
+pub fn walk_arrow_function_body<V: Visitor + ?Sized>(visitor: &mut V, body: &ArrowFunctionBody) {
+    match body {
+        ArrowFunctionBody::Expression(expr) => visitor.visit_expression(expr),
+        ArrowFunctionBody::Block(block) => visitor.visit_block_statement(block),
     }
 }
 

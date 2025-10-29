@@ -127,6 +127,19 @@ pub struct VariableDeclarator {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Pattern {
     Identifier(Identifier),
+    Object(ObjectPattern),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ObjectPattern {
+    pub span: Span,
+    pub properties: Vec<ObjectPatternProperty>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum ObjectPatternProperty {
+    Shorthand(Identifier),
+    KeyValue { key: Identifier, value: Pattern },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -192,6 +205,7 @@ pub enum Expression {
     Assignment(AssignmentExpression),
     Conditional(ConditionalExpression),
     JsxElement(JsxElement),
+    ArrowFunction(Box<ArrowFunctionExpression>),
     Parenthesized(ParenthesizedExpression),
 }
 
@@ -341,6 +355,21 @@ pub enum Literal {
     Boolean(bool, Span),
     Null(Span),
     Undefined(Span),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ArrowFunctionExpression {
+    pub span: Span,
+    pub params: Vec<FunctionParam>,
+    pub return_type: Option<TypeAnnotation>,
+    pub body: ArrowFunctionBody,
+    pub is_async: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum ArrowFunctionBody {
+    Expression(Box<Expression>),
+    Block(BlockStatement),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

@@ -1,6 +1,6 @@
 use js_ast::{
-    BinaryOperator, ExportDeclaration, Expression, Identifier, ImportSpecifier, Literal,
-    ModuleItem, Statement, VariableDeclaration, VariableKind, Visitor, parse_program,
+    ArrowFunctionBody, BinaryOperator, ExportDeclaration, Expression, Identifier, ImportSpecifier,
+    Literal, ModuleItem, Statement, VariableDeclaration, VariableKind, Visitor, parse_program,
     program_to_value,
 };
 
@@ -51,6 +51,7 @@ fn parses_basic_module() {
                     js_ast::Pattern::Identifier(Identifier { name, .. }) => {
                         assert_eq!(name, "value")
                     }
+                    other => panic!("unexpected pattern: {:?}", other),
                 }
                 assert_eq!(declarator.type_annotation.as_ref().unwrap().text, "number");
                 match declarator.init.as_ref().unwrap() {
@@ -174,6 +175,63 @@ fn visitor_collects_identifiers() {
     assert!(collector.names.contains(&"count".to_string()));
     assert!(collector.names.contains(&"increment".to_string()));
     assert!(collector.names.contains(&"Counter".to_string()));
+}
+
+#[test]
+fn parses_arrow_function_expression() {
+    let source = r#"
+        const add = (a: number, b: number) => a + b;
+        const inc = async (value: number): number => {
+            return value + 1;
+        };
+    "#;
+
+    let program = parse_program(source).expect("failed to parse");
+    assert_eq!(program.body.len(), 2);
+
+    match &program.body[0] {
+        ModuleItem::Statement(Statement::Declaration(js_ast::Declaration::Variable(var))) => {
+            let declarator = &var.declarations[0];
+            let init = declarator.init.as_ref().expect("expected initializer");
+            match init {
+                Expression::ArrowFunction(func) => {
+                    assert_eq!(func.params.len(), 2);
+                    assert!(func.return_type.is_none());
+                    assert!(!func.is_async);
+                    match &func.body {
+                        ArrowFunctionBody::Expression(expr) => {
+                            assert!(matches!(**expr, Expression::Binary(_)));
+                        }
+                        other => panic!("unexpected arrow function body: {:?}", other),
+                    }
+                }
+                other => panic!("unexpected initializer: {:?}", other),
+            }
+        }
+        other => panic!("unexpected module item: {:?}", other),
+    }
+
+    match &program.body[1] {
+        ModuleItem::Statement(Statement::Declaration(js_ast::Declaration::Variable(var))) => {
+            let declarator = &var.declarations[0];
+            let init = declarator.init.as_ref().expect("expected initializer");
+            match init {
+                Expression::ArrowFunction(func) => {
+                    assert_eq!(func.params.len(), 1);
+                    assert!(func.is_async);
+                    assert!(func.return_type.is_some());
+                    match &func.body {
+                        ArrowFunctionBody::Block(block) => {
+                            assert_eq!(block.body.len(), 1);
+                        }
+                        other => panic!("unexpected async arrow body: {:?}", other),
+                    }
+                }
+                other => panic!("unexpected initializer: {:?}", other),
+            }
+        }
+        other => panic!("unexpected module item: {:?}", other),
+    }
 }
 
 #[test]

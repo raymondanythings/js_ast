@@ -421,8 +421,276 @@ impl Parser {
     }
 
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
-        let ident = self.parse_identifier()?;
-        Ok(Pattern::Identifier(ident))
+        match self.current().kind {
+            TokenKind::Identifier => {
+                let ident = self.parse_identifier()?;
+                Ok(Pattern::Identifier(ident))
+            }
+            TokenKind::Punctuator(Punctuator::LBrace) => self.parse_object_pattern(),
+            TokenKind::Punctuator(Punctuator::LBracket) => self.parse_array_pattern(),
+            _ => Err(self.error(self.current().span, "Expected pattern")),
+        }
+    }
+
+    fn parse_object_pattern(&mut self) -> Result<Pattern, ParseError> {
+        let start = self.expect_punctuator(Punctuator::LBrace)?.span.start;
+        let mut properties = Vec::new();
+        while !self.check_punctuator(Punctuator::RBrace) {
+            let key = self.parse_identifier()?;
+            let property = if self.match_punctuator(Punctuator::Colon) {
+                let value = self.parse_pattern()?;
+                ObjectPatternProperty::KeyValue { key, value }
+            } else {
+                ObjectPatternProperty::Shorthand(key)
+            };
+            properties.push(property);
+            if !self.match_punctuator(Punctuator::Comma) {
+                break;
+            }
+        }
+        let end = self.expect_punctuator(Punctuator::RBrace)?.span.end;
+        Ok(Pattern::Object(ObjectPattern {
+            span: Span::new(start, end),
+            properties,
+        }))
+    }
+
+    fn parse_array_pattern(&mut self) -> Result<Pattern, ParseError> {
+        self.expect_punctuator(Punctuator::LBracket)?;
+        while !self.check_punctuator(Punctuator::RBracket) {
+            if self.match_punctuator(Punctuator::Comma) {
+                continue;
+            }
+            self.parse_pattern()?;
+            if !self.match_punctuator(Punctuator::Comma) {
+                break;
+            }
+        }
+        self.expect_punctuator(Punctuator::RBracket)?;
+        Err(self.error(self.previous().span, "Array patterns are not yet supported"))
+    }
+
+    fn try_parse_arrow_function(&mut self) -> Result<Option<Expression>, ParseError> {
+        let checkpoint = self.pos;
+        let mut is_async = false;
+        let mut start_span = self
+            .tokens
+            .get(self.pos)
+            .map(|token| token.span.start)
+            .unwrap_or(0);
+
+        if self.check_keyword(Keyword::Async)
+            && !matches!(
+                self.lookahead_kind(1),
+                Some(TokenKind::Keyword(Keyword::Function))
+            )
+        {
+            is_async = true;
+            start_span = self.current().span.start;
+            self.advance();
+        }
+
+        if self.check_punctuator(Punctuator::LParen) && self.is_parenthesized_arrow_start(self.pos)
+        {
+            let (params, params_start) = self.parse_arrow_parameter_list()?;
+            let start = if is_async { start_span } else { params_start };
+            let expression = self.finish_arrow_function(start, is_async, params)?;
+            return Ok(Some(expression));
+        }
+
+        if self.check_kind(&TokenKind::Identifier)
+            && matches!(
+                self.lookahead_kind(1),
+                Some(TokenKind::Operator(Operator::FatArrow))
+            )
+        {
+            let start = if is_async {
+                start_span
+            } else {
+                self.current().span.start
+            };
+            let expression = self.parse_arrow_single_param(start, is_async)?;
+            return Ok(Some(expression));
+        }
+
+        if is_async {
+            self.pos = checkpoint;
+        }
+
+        Ok(None)
+    }
+
+    fn parse_arrow_parameter_list(&mut self) -> Result<(Vec<FunctionParam>, usize), ParseError> {
+        let open = self.expect_punctuator(Punctuator::LParen)?;
+        let params = self.parse_parameter_list()?;
+        self.expect_punctuator(Punctuator::RParen)?;
+        Ok((params, open.span.start))
+    }
+
+    fn parse_arrow_single_param(
+        &mut self,
+        start: usize,
+        is_async: bool,
+    ) -> Result<Expression, ParseError> {
+        let identifier = self.parse_identifier()?;
+        let param_span = identifier.span;
+        let pattern = Pattern::Identifier(identifier);
+        let param = FunctionParam {
+            span: param_span,
+            pattern,
+            type_annotation: None,
+        };
+        self.finish_arrow_function(start, is_async, vec![param])
+    }
+
+    fn finish_arrow_function(
+        &mut self,
+        start: usize,
+        is_async: bool,
+        params: Vec<FunctionParam>,
+    ) -> Result<Expression, ParseError> {
+        let return_type = if self.match_punctuator(Punctuator::Colon) {
+            Some(self.parse_type_annotation(start)?)
+        } else {
+            None
+        };
+
+        self.expect_operator(Operator::FatArrow)?;
+
+        if self.check_punctuator(Punctuator::LBrace) {
+            let block = self.parse_block_statement()?;
+            let span = Span::new(start, block.span.end);
+            Ok(Expression::ArrowFunction(Box::new(
+                ArrowFunctionExpression {
+                    span,
+                    params,
+                    return_type,
+                    body: ArrowFunctionBody::Block(block),
+                    is_async,
+                },
+            )))
+        } else {
+            let expr = self.parse_expression()?;
+            let span = Span::new(start, expr.span().end);
+            Ok(Expression::ArrowFunction(Box::new(
+                ArrowFunctionExpression {
+                    span,
+                    params,
+                    return_type,
+                    body: ArrowFunctionBody::Expression(Box::new(expr)),
+                    is_async,
+                },
+            )))
+        }
+    }
+
+    fn is_parenthesized_arrow_start(&self, pos: usize) -> bool {
+        let mut index = pos;
+        if !matches!(
+            self.tokens.get(index).map(|token| &token.kind),
+            Some(TokenKind::Punctuator(Punctuator::LParen))
+        ) {
+            return false;
+        }
+
+        let mut depth = 1usize;
+        index += 1;
+        while index < self.tokens.len() {
+            match &self.tokens[index].kind {
+                TokenKind::Punctuator(Punctuator::LParen) => depth += 1,
+                TokenKind::Punctuator(Punctuator::RParen) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        index += 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+
+        if depth != 0 {
+            return false;
+        }
+
+        if index >= self.tokens.len() {
+            return false;
+        }
+
+        if matches!(
+            self.tokens.get(index).map(|token| &token.kind),
+            Some(TokenKind::Operator(Operator::FatArrow))
+        ) {
+            return true;
+        }
+
+        if !matches!(
+            self.tokens.get(index).map(|token| &token.kind),
+            Some(TokenKind::Punctuator(Punctuator::Colon))
+        ) {
+            return false;
+        }
+
+        let mut j = index + 1;
+        let mut depth_angle = 0usize;
+        let mut depth_paren = 0usize;
+        let mut depth_bracket = 0usize;
+        let mut depth_brace = 0usize;
+
+        while j < self.tokens.len() {
+            match &self.tokens[j].kind {
+                TokenKind::Operator(Operator::FatArrow)
+                    if depth_angle == 0
+                        && depth_paren == 0
+                        && depth_bracket == 0
+                        && depth_brace == 0 =>
+                {
+                    return true;
+                }
+                TokenKind::Operator(Operator::Lt) => depth_angle += 1,
+                TokenKind::Operator(Operator::Gt) => {
+                    if depth_angle == 0 {
+                        return false;
+                    }
+                    depth_angle -= 1;
+                }
+                TokenKind::Punctuator(Punctuator::LParen) => depth_paren += 1,
+                TokenKind::Punctuator(Punctuator::RParen) => {
+                    if depth_paren == 0 {
+                        return false;
+                    }
+                    depth_paren -= 1;
+                }
+                TokenKind::Punctuator(Punctuator::LBracket) => depth_bracket += 1,
+                TokenKind::Punctuator(Punctuator::RBracket) => {
+                    if depth_bracket == 0 {
+                        return false;
+                    }
+                    depth_bracket -= 1;
+                }
+                TokenKind::Punctuator(Punctuator::LBrace) => depth_brace += 1,
+                TokenKind::Punctuator(Punctuator::RBrace) => {
+                    if depth_brace == 0 {
+                        return false;
+                    }
+                    depth_brace -= 1;
+                }
+                TokenKind::Punctuator(Punctuator::Comma)
+                | TokenKind::Punctuator(Punctuator::Semi)
+                    if depth_angle == 0
+                        && depth_paren == 0
+                        && depth_bracket == 0
+                        && depth_brace == 0 =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+
+        false
     }
 
     fn parse_expression(&mut self) -> Result<Expression, ParseError> {
@@ -430,6 +698,9 @@ impl Parser {
     }
 
     fn parse_assignment_expression(&mut self) -> Result<Expression, ParseError> {
+        if let Some(arrow) = self.try_parse_arrow_function()? {
+            return Ok(arrow);
+        }
         let left = self.parse_binary_expression(1)?;
         if let Some(op) = self.match_assignment_operator() {
             let right = self.parse_assignment_expression()?;
@@ -881,16 +1152,16 @@ impl Parser {
         let mut depth_angle = 0usize;
         let mut depth_paren = 0usize;
         let mut depth_bracket = 0usize;
+        let mut depth_brace = 0usize;
         let mut end = start;
         while !self.is_at_end() {
             let token = self.current().clone();
-            if depth_angle == 0 && depth_paren == 0 && depth_bracket == 0 {
+            if depth_angle == 0 && depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 {
                 if matches!(token.kind, TokenKind::Operator(Operator::Assign))
                     || matches!(token.kind, TokenKind::Punctuator(Punctuator::Comma))
                     || matches!(token.kind, TokenKind::Punctuator(Punctuator::Semi))
                     || matches!(token.kind, TokenKind::Punctuator(Punctuator::RParen))
                     || matches!(token.kind, TokenKind::Punctuator(Punctuator::RBrace))
-                    || matches!(token.kind, TokenKind::Punctuator(Punctuator::LBrace))
                     || matches!(token.kind, TokenKind::Operator(Operator::FatArrow))
                 {
                     break;
@@ -917,6 +1188,23 @@ impl Parser {
                         break;
                     }
                     depth_bracket -= 1;
+                }
+                TokenKind::Punctuator(Punctuator::LBrace) => {
+                    if depth_angle == 0
+                        && depth_paren == 0
+                        && depth_bracket == 0
+                        && depth_brace == 0
+                        && !text.is_empty()
+                    {
+                        break;
+                    }
+                    depth_brace += 1;
+                }
+                TokenKind::Punctuator(Punctuator::RBrace) => {
+                    if depth_brace == 0 {
+                        break;
+                    }
+                    depth_brace -= 1;
                 }
                 _ => {}
             }
@@ -1113,12 +1401,14 @@ impl SpanAccess for Pattern {
     fn span_start(&self) -> usize {
         match self {
             Pattern::Identifier(id) => id.span.start,
+            Pattern::Object(pattern) => pattern.span.start,
         }
     }
 
     fn span_end(&self) -> usize {
         match self {
             Pattern::Identifier(id) => id.span.end,
+            Pattern::Object(pattern) => pattern.span.end,
         }
     }
 }
@@ -1143,6 +1433,7 @@ impl Expression {
             Expression::Assignment(assign) => assign.span,
             Expression::Conditional(cond) => cond.span,
             Expression::JsxElement(jsx) => jsx.span,
+            Expression::ArrowFunction(func) => func.span,
             Expression::Parenthesized(paren) => paren.span,
         }
     }
